@@ -175,14 +175,16 @@ class GPTSql:
             try:
                 dt = datetime.fromisoformat(v)
                 self.config[k] = dt
-            except:
+            except Exception as e:
+                print("Error1: ", e)
                 pass
 
     def get_version(self):
         try:
             pyproject = toml.load(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"))
             return pyproject["tool"]["poetry"]["version"]
-        except:
+        except Exception as e:
+            print("Error2: ", e)
             return importlib.metadata.version("gptsql")
 
     def get_or_create_assistant(self):
@@ -192,7 +194,8 @@ class GPTSql:
         if self.config.get("assistant_id") is not None:
             try:
                 self.assistant = self.oaclient.beta.assistants.retrieve(self.config["assistant_id"])
-            except openai.NotFoundError:
+            except openai.NotFoundError as e:
+                print("Assistant not found: ", e)
                 pass
 
         if self.assistant is None:
@@ -221,7 +224,8 @@ You are an assistant helping with data analysis and to query a postgres database
         if self.config.get("last_run_id") is not None:
             try:
                 self.oaclient.beta.threads.runs.cancel(thread_id=thread.id, run_id=self.config["last_run_id"])
-            except(openai.BadRequestError, openai.NotFoundError):
+            except(openai.BadRequestError, openai.NotFoundError) as e:
+                print("Error4: ", e)
                 pass
             
         self.last_message_created_at = self.config.get('last_messsage_time')
@@ -273,7 +277,8 @@ exit
                 self.process_command(thread, cmd)
                 spinner.stop()
                 self.display_messages()
-            except (KeyboardInterrupt, EOFError):
+            except (KeyboardInterrupt, EOFError) as e:
+                print("Error5: ", e)
                 spinner.stop()
                 return
 
