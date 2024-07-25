@@ -4,6 +4,7 @@ import importlib.metadata
 import json
 import os
 import psycopg2
+import singlestoredb as s2
 import time
 import toml
 
@@ -22,6 +23,9 @@ GPT_MODEL4="gpt-4-1106-preview"
 GPT_MODEL=GPT_MODEL4
 #GPT_MODEL="gpt-4-1106-preview"
 
+POSTGRES_DEFAULT_PORT = 5432
+SINGLESTORE_DEFAULT_PORT = 3306
+
 # Replace these with your specific database credentials
 
 class GPTSql:
@@ -30,13 +34,13 @@ class GPTSql:
             "type": "function",
             "function": {
                 "name": "run_sql_command",
-                "description": "Execute any SQL command against the Postgres datbase",
+                "description": "Execute any SQL command against the SingleStore/Postgres datbase",
                 "parameters": {
                     "type": "object", 
                     "properties": {
                         "query": {
                             "type":"string",
-                            "description":"Postgres syntax SQL query"
+                            "description":"SingleStore/Postgres syntax SQL query"
                         }
                     }
                 }
@@ -63,38 +67,49 @@ class GPTSql:
         args = self.parse_args()
 
         if 'DBUSER' in self.config and 'DBHOST' in self.config:
+            db_type = self.config['DBTYPE']
             db_username = self.config['DBUSER']
             db_password = self.config['DBPASSWORD']
             db_host = self.config['DBHOST']
             db_port = int(self.config['DBPORT'])
             db_name = self.config['DBNAME']
         else:
+            db_type = args.dbtype or os.environ.get('DBTYPE')
             db_username = args.username or os.environ.get('DBUSER')
             db_password = args.password or os.environ.get('DBPASSWORD')
             db_host = args.host or os.environ.get('DBHOST')
-            db_port = args.port or 5432
+            if args.port:
+                db_port = args.port
+            else:
+                db_port = POSTGRES_DEFAULT_PORT if db_type == 'PostgreSQL' else SINGLESTORE_DEFAULT_PORT
             db_name = args.dbname or os.environ.get('DBNAME')
 
         if db_host is None:
             connection_good = False
             while not connection_good:
                 print("Let's setup your database connection...")
+                choice = prompt("Choose the database type (SingleStore (1) or PostgreSQL (2)): ")
+                db_type = 'PostgreSQL' if choice == '2' else 'SingleStore'
                 db_host = prompt("Enter your database host: ")
                 db_username = prompt("Enter your database username: ")
                 db_password = prompt("Enter your database password: ", is_password=True)
                 db_name = prompt("Enter the database name: ")
-                db_port = prompt("Enter your database port (5432): ") or 5432
+                default_port = POSTGRES_DEFAULT_PORT if db_type == 'PostgreSQL' else SINGLESTORE_DEFAULT_PORT
+                db_port = prompt("Enter your database port ({}): ".format(default_port)) or default_port
                 db_port = int(db_port)
                 print("Validating connection info...")
                 try:
-                    pgconn = psycopg2.connect(
-                        f"host={db_host} dbname={db_name} user={db_username} password={db_password}",
-                        connect_timeout=10
-                    )
-                    with pgconn.cursor() as cursor:
+                    if db_type == 'PostgreSQL':
+                        conn = psycopg2.connect(
+                            f"host={db_host} dbname={db_name} user={db_username} password={db_password}",
+                            connect_timeout=10
+                        )
+                    else:
+                        conn = s2.connect(host=db_host, user=db_username, password=db_password, port=db_port)
+                    with conn.cursor() as cursor:
                         cursor.execute("SELECT version();")
                     connection_good = True
-                except psycopg2.OperationalError as e:
+                except (s2.OperationalError, psycopg2.OperationalError) as e:
                     print("Error: ", e)
                     continue
                 self.config |= {
@@ -102,26 +117,34 @@ class GPTSql:
                     "DBPASSWORD": db_password,
                     "DBHOST": db_host,
                     "DBPORT": db_port,
-                    "DBNAME": db_name
+                    "DBNAME": db_name,
+                    "DBTYPE": db_type
                 }
 
             self.save_config()
-        
-        # PostgreSQL connection string format
+
+        # connection string format
         self.db_config = {
             'db_username': db_username,
             'db_password': db_password,
             'db_host': db_host,
             'db_port': db_port,
-            'db_name': db_name
+            'db_name': db_name,
+            'db_type': db_type
         }
-        self.connection_string = f'postgresql://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}'
+        if db_type == 'PostgreSQL':
+            self.connection_string = f'postgresql://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}'
+        else:
+            self.connection_string = f'mysql://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}'
 
         self.engine = create_engine(self.connection_string)
         # Connect to your database
-        self.pgconn = psycopg2.connect(
-            f"host={db_host} dbname={db_name} user={db_username} password={db_password}"
-        )
+        if db_type == 'PostgreSQL':
+            self.conn = psycopg2.connect(
+                f"host={db_host} dbname={db_name} user={db_username} password={db_password}"
+            )
+        else:
+            self.conn = s2.connect(host=db_host, user=db_username, password=db_password, port=db_port, database=db_name)
         self.thread = None
 
         api_key = self.config.get('OPENAI_API_KEY') or os.environ.get('OPENAI_API_KEY')
@@ -146,6 +169,7 @@ class GPTSql:
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument('-help', '--help', action='help', default=argparse.SUPPRESS, help='Show this help message and exit')
 
+        parser.add_argument('-dt', '--dbtype', type=str, required=False)
         parser.add_argument('-h', '--host', type=str, required=False)
         parser.add_argument('-p', '--port', type=int, required=False)
         parser.add_argument('-U', '--username', type=str, required=False)
@@ -173,8 +197,9 @@ class GPTSql:
 
         for k, v in self.config.items():
             try:
-                dt = datetime.fromisoformat(v)
-                self.config[k] = dt
+                # TODO: is this necessary?
+                # dt = datetime.fromisoformat(v)
+                self.config[k] = v
             except Exception as e:
                 print("Error1: ", e)
                 pass
@@ -203,9 +228,10 @@ class GPTSql:
             self.assistant = self.oaclient.beta.assistants.create(
                 name=ASSISTANT_NAME,
                 instructions="""
-You are an assistant helping with data analysis and to query a postgres database. 
+You are an assistant helping with data analysis and to query a postgres/singlestoredb database. 
 """,
-                tools=[{"type": "code_interpreter"},{"type": "retrieval"}] + self.FUNCTION_TOOLS,
+                tools=[{"type": "code_interpreter"}] + self.FUNCTION_TOOLS,
+                # tools=[{"type": "code_interpreter"}, {"type": "retrieval"}] + self.FUNCTION_TOOLS,
                 model=self.config['model']
             )   
             self.save_config("assistant_id", self.assistant.id)
@@ -229,13 +255,13 @@ You are an assistant helping with data analysis and to query a postgres database
                 pass
             
         self.last_message_created_at = self.config.get('last_messsage_time')
-        self.table_list = get_table_list(self.engine)
+        self.table_list = get_table_list(self.engine, self.db_config.get("db_name"))
 
         spinner = Halo(text='thinking', spinner='dots')
         self.spinner = spinner
 
         print("""
-Welcome to GPTSQL, the chat interface to your Postgres database.
+Welcome to GPTSQL, the chat interface to your SingleStore/Postgres database.
 You can ask questions like:
     "help" (show some system commands)
     "show all the tables"
@@ -273,6 +299,7 @@ exit
                     return
 
                 cmd = "These are the tables in the database:\n" + ",".join(self.table_list) + "\n----\n" + cmd
+                print(cmd)
                 spinner.start("thinking...")
                 self.process_command(thread, cmd)
                 spinner.stop()
