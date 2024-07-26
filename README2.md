@@ -30,3 +30,21 @@ pip install PyMySQL
 `poetry shell`
 
 `python -m gptsql`
+
+## Install postgresql (optional):
+`brew install postgresql`
+For more details, read:
+  https://www.postgresql.org/docs/14/app-initdb.html
+```shell
+Or, if you don't want/need a background service you can just run:
+  /usr/local/opt/postgresql@14/bin/postgres -D /usr/local/var/postgresql@14
+pg_config --version
+```
+
+```shell
+brew services start postgresql@14
+psql postgres
+initdb /usr/local/var/postgres
+pg_ctl -D /usr/local/var/postgres start
+psql -U vocheretnyi -d postgres
+```
